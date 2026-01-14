@@ -82,7 +82,6 @@ class Sherlock {
 
   evalForNavigation(pageType, pageId) {
     if (pageType != null && pageId != null && pageType + pageId !== this.lastLocation) {
-      console.log(`Detected navigation to: ${pageType}://${pageId}`);
       document.dispatchEvent(new CustomEvent(Sherlock.eventName, { detail: { type: pageType, id: pageId } }));
       this.lastLocation = pageType + pageId;
     }
@@ -106,14 +105,9 @@ class Sherlock {
     if (el) { callback(el); return; }
 
     let mo = new MutationObserver((mutations) => {
-      outerLoop: for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (document.querySelector(id)) {
-            mo.disconnect();
-            callback(document.querySelector(id));
-            break outerLoop;
-          }
-        }
+      if (document.querySelector(id)) {
+        mo.disconnect();
+        callback(document.querySelector(id));
       }
     });
     mo.observe(document.body, { childList: true, subtree: true });
@@ -133,80 +127,93 @@ class SherlockWorker {
 // Global Styles
 let style = document.createElement("style");
 style.textContent = `
-/* Hide page content initially to prevent flicker */
-.page-content {
-    opacity: 0;
-    transition: opacity 0.3s ease-in-out;
-}
+  .page-content {
+      opacity: 0;
+      transition: opacity 0.4s ease-in-out;
+  }
 
-/* Class to reveal content once Sherlock is finished */
-.page-content.sherlock-ready {
-    opacity: 1 !important;
-}
+  .page-content.sherlock-ready {
+      opacity: 1 !important;
+  }
 
-#side-menu {
-    margin-top: 0.6rem;
-    width: 20%;
-    padding: 1rem;
-    border-radius: 6px;
-    border: 1px solid #e2e2e4;
-    box-shadow: 0 2px 4px 0 rgba(30, 31, 31, 0.1);
-    background-color: #ffffff;
-}
+  #side-menu {
+      margin-top: 0.6rem;
+      width: 250px;
+      padding: 1rem;
+      border-radius: 6px;
+      border: 1px solid #e2e2e4;
+      background-color: #ffffff;
+  }
 
-#side-menu li { margin-bottom: 0.5rem; margin-top: 0.5rem; padding: 0.5rem 0rem; }
-#side-menu li.active { font-weight: bold; color: #0078d4; }
+  #side-menu li.active a { font-weight: bold; color: #0078d4; }
 
-*:has(>#side-menu) {
-    display: flex;
-    gap: 2rem;
-    align-items: flex-start;
-}
+  /* Ensure the container behaves like a flexbox when the menu is present */
+  .page-content:has(#side-menu) {
+      display: flex;
+      gap: 2rem;
+      align-items: flex-start;
+  }
 `;
 document.head.appendChild(style);
 
 var sherlock = new Sherlock();
 
-// SIDE MENU LOGIC WITH REVEAL PROTECTION
 sherlock
   .on("*")
-  .find("html:has(.breadcrumbs-list):has(.page-content)")
+  .find("html:has(.page-content)")
   .do(async (e) => {
     const pageContent = document.querySelector(".page-content");
-    // Force hidden if CSS hasn't caught it yet
-    if (pageContent) pageContent.style.opacity = "0";
+    if (!pageContent) return;
 
-    Sherlock.doWhenElementAppears(".breadcrumbs-list", async (container) => {
-      let sideMenuContainer = document.getElementById("side-menu");
-      let menuData = undefined;
+    // --- REVEAL PROTECTION ---
+    // Safety: If logic hangs, show the page after 2 seconds regardless.
+    let hasRevealed = false;
+    const revealPage = () => {
+      if (hasRevealed) return;
+      hasRevealed = true;
+      pageContent.classList.add("sherlock-ready");
+    };
+    const safetyTimer = setTimeout(revealPage, 2000);
 
+    // Only attempt menu logic on specific page types
+    const pageType = document.documentElement.getAttribute("data-current-page-type");
+    const validMenuPages = ["staticPage", "menuPage", "feed"];
+
+    if (!validMenuPages.includes(pageType)) {
+      revealPage();
+      return;
+    }
+
+    // Wait for breadcrumbs to build the menu
+    Sherlock.doWhenElementAppears(".breadcrumbs-list", async () => {
       try {
+        let sideMenuContainer = document.getElementById("side-menu");
+        let menuData = null;
+
         let crumbtrailIds = getCrumbtrailIds();
-        if (e.dataset.menuId) crumbtrailIds.unshift(e.dataset.menuId);
+        const currentMenuId = document.documentElement.getAttribute("data-menu-id");
+        if (currentMenuId) crumbtrailIds.unshift(currentMenuId);
 
         for (let id of crumbtrailIds) {
-          try {
-            let response = await fetch("/api/menu/" + id);
-            if (response.ok) {
-              let data = await response.json();
-              if (data?.children?.data?.length > 0) {
-                menuData = data;
-                break;
-              }
+          const response = await fetch(`/api/menu/${id}`);
+          if (response.ok) {
+            const data = await response.json();
+            if (data?.children?.data?.length > 0) {
+              menuData = data;
+              break;
             }
-          } catch (err) { console.error("Fetch failed for", id); }
+          }
         }
 
         if (menuData) {
           if (!sideMenuContainer) {
             sideMenuContainer = document.createElement("div");
             sideMenuContainer.id = "side-menu";
-            sideMenuContainer.dataset.currentMenuId = menuData.id;
             pageContent.insertBefore(sideMenuContainer, pageContent.firstChild);
           }
 
           let sideMenu = document.createElement("ul");
-          for (let item of menuData.children.data) {
+          menuData.children.data.forEach(item => {
             let li = document.createElement("li");
             if (item.id === menuData.id) li.classList.add("active");
             let link = document.createElement("a");
@@ -214,35 +221,28 @@ sherlock
             link.textContent = item.config.localization.en_US.title;
             li.appendChild(link);
             sideMenu.appendChild(li);
-          }
+          });
 
           let heading = document.createElement("h3");
           heading.textContent = menuData.config.localization.en_US.title || "Menu";
           sideMenuContainer.replaceChildren(heading, sideMenu);
-        } else {
-          sideMenuContainer?.remove();
         }
-
       } catch (err) {
-        console.error("Sherlock Error:", err);
+        console.error("Side Menu Error:", err);
       } finally {
-        // REVEAL CONTENT: Ensure the page shows even if logic fails
-        if (pageContent) {
-          pageContent.classList.add("sherlock-ready");
-        }
+        clearTimeout(safetyTimer);
+        revealPage();
       }
     });
   });
 
 sherlock.observe();
 
-// Helper Functions
 function getCrumbtrailIds() {
   return Array.from(document.querySelectorAll(".breadcrumbs-list-item:has(a)"))
     .reverse()
-    .map((item) => getHex24Segment(item.querySelector("a").getAttribute("href").split("?", 1)[0]));
-}
-
-function getHex24Segment(path) {
-  return path.split("/").find((segment) => /^[0-9a-f]{24}$/i.test(segment)) || null;
+    .map(item => {
+      const href = item.querySelector("a").getAttribute("href").split("?", 1)[0];
+      return href.split("/").find(s => /^[0-9a-f]{24}$/i.test(s)) || null;
+    }).filter(id => id !== null);
 }
