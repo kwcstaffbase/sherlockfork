@@ -7,7 +7,7 @@
 // --- CONFIGURATION ---
 const CONFIG = {
     // The Channel ID provided in the requirements
-    channelId: "62dae31dae96d800cb1eaac1",
+    channelId: "62dae31edc1985262e535897",
     
     // API Configuration
     // NOTE: Use relative path '/api' if running internally, or full URL if external.
